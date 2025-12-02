@@ -7,6 +7,10 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const fetchUrlContent = async (url: string): Promise<string> => {
   // Danh sách các Proxy để dự phòng nếu cái này lỗi thì dùng cái kia
   const proxies = [
+    {
+      url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+      handler: async (res: Response) => res.text()
+    },
     { 
       url: `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
       handler: async (res: Response) => {
@@ -60,13 +64,16 @@ const cleanHtmlContent = (html: string): string => {
 
 export const sendMessageToGemini = async (
   message: string,
-  history: { role: string; parts: { text: string }[] }[]
+  history: { role: string; parts: { text: string }[] }[],
+  customSystemInstruction?: string
 ): Promise<string> => {
   try {
+    const defaultInstruction = "You are a friendly, encouraging AI tutor for LearnAI. You help users learn languages and subjects using the Socratic method and spaced repetition concepts. Keep answers concise, helpful, and motivating.";
+    
     const chat = ai.chats.create({
       model: 'gemini-2.5-flash',
       config: {
-        systemInstruction: "You are a friendly, encouraging AI tutor for LearnAI. You help users learn languages and subjects using the Socratic method and spaced repetition concepts. Keep answers concise, helpful, and motivating.",
+        systemInstruction: customSystemInstruction || defaultInstruction,
       },
       history: history,
     });
@@ -108,27 +115,24 @@ export const scanUrlForContent = async (input: string): Promise<string> => {
     }
 };
 
+// Base schema for tags to be used in multiple functions
+const tagsSchema = {
+    type: Type.ARRAY,
+    items: { type: Type.STRING },
+    description: "Generate 3-5 short topic tags (e.g., 'History', 'Math', 'Vocabulary') to categorize this content."
+};
+
 /**
- * Giai đoạn 2: Tạo nội dung học tập từ Text đã trích xuất
+ * Helper to get Schema based on method
  */
-export const generateLearningContent = async (
-  processedContent: string,
-  method: 'Flashcard' | 'Quiz' | 'Fill-in-the-blanks' | 'Spot the Error' | 'Case Study'
-): Promise<any> => {
-  try {
-    // Cắt bớt nội dung nếu quá dài (Gemini 2.5 chịu được khoảng 1M token, nhưng an toàn là trên hết cho demo)
-    const finalContentToProcess = processedContent.substring(0, 100000); 
-
-    let systemInstruction = "";
-    let responseSchema: any = {};
-
+const getSchemaForMethod = (method: string) => {
     switch (method) {
         case 'Flashcard':
-            systemInstruction = "You are a content alchemist. Extract key concepts from the provided text and create a set of 8-12 high-quality flashcards. Return ONLY valid JSON.";
-            responseSchema = {
+            return {
                 type: Type.OBJECT,
                 properties: {
                     title: { type: Type.STRING, description: "A short, catchy title for this study set" },
+                    tags: tagsSchema,
                     flashcards: {
                         type: Type.ARRAY,
                         items: {
@@ -141,14 +145,12 @@ export const generateLearningContent = async (
                     }
                 }
             };
-            break;
-
         case 'Quiz':
-            systemInstruction = "You are a professional examiner. Create a challenging multiple-choice quiz with EXACTLY 12 questions based on the provided text. Ensure distractors are plausible.";
-            responseSchema = {
+            return {
                 type: Type.OBJECT,
                 properties: {
                     title: { type: Type.STRING },
+                    tags: tagsSchema,
                     quiz: {
                         type: Type.ARRAY,
                         items: {
@@ -163,14 +165,12 @@ export const generateLearningContent = async (
                     }
                 }
             };
-            break;
-
         case 'Fill-in-the-blanks':
-            systemInstruction = "You are a language teacher. Create EXACTLY 12 'Fill-in-the-blanks' exercises based on the text. Select key terms or important facts to be the blanks. The sentence should provide enough context.";
-            responseSchema = {
+            return {
                 type: Type.OBJECT,
                 properties: {
                     title: { type: Type.STRING },
+                    tags: tagsSchema,
                     fillInBlanks: {
                         type: Type.ARRAY,
                         items: {
@@ -183,14 +183,12 @@ export const generateLearningContent = async (
                     }
                 }
             };
-            break;
-
         case 'Spot the Error':
-            systemInstruction = "You are a critical thinking coach. Create EXACTLY 12 items. For each item, take a fact from the text and slightly alter it to create a subtle factual or logical error. The user must find this error.";
-            responseSchema = {
+            return {
                 type: Type.OBJECT,
                 properties: {
                     title: { type: Type.STRING },
+                    tags: tagsSchema,
                     spotErrors: {
                         type: Type.ARRAY,
                         items: {
@@ -204,14 +202,12 @@ export const generateLearningContent = async (
                     }
                 }
             };
-            break;
-
         case 'Case Study':
-            systemInstruction = "You are a professor. Create EXACTLY 12 mini-case scenarios or applied questions based on the concepts in the text. Each item should present a short real-world situation and ask for analysis.";
-            responseSchema = {
+            return {
                 type: Type.OBJECT,
                 properties: {
                     title: { type: Type.STRING },
+                    tags: tagsSchema,
                     caseStudies: {
                         type: Type.ARRAY,
                         items: {
@@ -225,22 +221,41 @@ export const generateLearningContent = async (
                     }
                 }
             };
-            break;
-
         default:
-            systemInstruction = "Summarize the content.";
-            responseSchema = {
+            return {
                  type: Type.OBJECT,
                  properties: {
                      title: { type: Type.STRING },
+                     tags: tagsSchema,
                      summary: { type: Type.STRING }
                  }
             };
     }
+}
+
+/**
+ * Giai đoạn 2: Tạo nội dung học tập từ Text đã trích xuất
+ */
+export const generateLearningContent = async (
+  processedContent: string,
+  method: 'Flashcard' | 'Quiz' | 'Fill-in-the-blanks' | 'Spot the Error' | 'Case Study'
+): Promise<any> => {
+  try {
+    const finalContentToProcess = processedContent.substring(0, 100000); 
+    const responseSchema = getSchemaForMethod(method);
+    let systemInstruction = "";
+
+    switch (method) {
+        case 'Flashcard': systemInstruction = "Extract key concepts and create 8-12 flashcards."; break;
+        case 'Quiz': systemInstruction = "Create exactly 12 multiple-choice questions."; break;
+        case 'Fill-in-the-blanks': systemInstruction = "Create exactly 12 fill-in-the-blank exercises."; break;
+        case 'Spot the Error': systemInstruction = "Create exactly 12 error spotting exercises."; break;
+        case 'Case Study': systemInstruction = "Create exactly 12 mini case studies."; break;
+    }
 
     const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: `Analyze this content and generate ${method} (Target: 12 items if applicable):\n\n${finalContentToProcess}`,
+        contents: `Analyze this content and generate ${method}:\n\n${finalContentToProcess}`,
         config: {
             systemInstruction: systemInstruction,
             responseMimeType: "application/json",
@@ -258,3 +273,185 @@ export const generateLearningContent = async (
     throw error;
   }
 };
+
+/**
+ * Feature: Vision Alchemy
+ * Generates learning content directly from an image (base64)
+ */
+export const generateContentFromImage = async (
+    imageBase64: string,
+    method: 'Flashcard' | 'Quiz' | 'Fill-in-the-blanks' | 'Spot the Error' | 'Case Study'
+): Promise<any> => {
+    try {
+        const responseSchema = getSchemaForMethod(method);
+        
+        // Convert base64 data URL to simple base64 string if needed
+        const base64Data = imageBase64.split(',')[1] || imageBase64;
+
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: {
+                parts: [
+                    {
+                        inlineData: {
+                            mimeType: 'image/jpeg', // Assuming jpeg/png, Gemini handles standard image types well
+                            data: base64Data
+                        }
+                    },
+                    {
+                        text: `Analyze this image (diagram, text, or scene) and generate educational content in the format of: ${method}. If there is text, use it. If it's a diagram, explain the components.`
+                    }
+                ]
+            },
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: responseSchema
+            }
+        });
+
+        if (response.text) {
+            return JSON.parse(response.text);
+        }
+        throw new Error("No data returned from Image Analysis");
+    } catch (error) {
+        console.error("Error generating content from image:", error);
+        throw error;
+    }
+}
+
+/**
+ * Feature: AI Pathfinder
+ * Analyzes the graph and suggests a learning path
+ */
+export const generateLearningPath = async (
+    targetNodeTitle: string,
+    allNodesContext: string
+): Promise<string[]> => {
+    try {
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: `I have a knowledge graph with the following nodes (Format: ID - Title - Tags):
+            ${allNodesContext}
+            
+            My goal is to master the node: "${targetNodeTitle}".
+            
+            Based on logical progression and prerequisites, select a sequence of existing Node IDs that I should study to reach this goal. Start from the most fundamental.
+            
+            Return ONLY a JSON array of Node IDs strings. Example: ["id1", "id2", "id3"].`,
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING }
+                }
+            }
+        });
+
+        if (response.text) {
+            return JSON.parse(response.text);
+        }
+        return [];
+    } catch (error) {
+        console.error("Pathfinding error:", error);
+        return [];
+    }
+}
+
+/**
+ * Feature: Refinement Crucible
+ * Allows refining existing JSON content (Simplify, Translate, Deepen)
+ */
+export const refineLearningContent = async (
+    currentData: any, 
+    refinementType: 'Simplify' | 'Translate' | 'Deepen' | 'Add Examples'
+): Promise<any> => {
+    try {
+        const jsonString = JSON.stringify(currentData);
+        let prompt = "";
+
+        if (refinementType === 'Simplify') {
+            prompt = "Simplify the language and concepts in this JSON content to make it easier for a beginner to understand. Keep the same JSON structure.";
+        } else if (refinementType === 'Translate') {
+            prompt = "Translate all 'front', 'back', 'question', 'explanation', 'sentence', 'answer', 'text', 'error', 'correction', 'scenario', 'analysis', and 'title' fields to Vietnamese. Keep the same JSON structure.";
+        } else if (refinementType === 'Deepen') {
+            prompt = "Add more depth and detail to the 'explanation', 'analysis', or 'back' fields. Make the questions slightly harder or more comprehensive. Keep the same JSON structure.";
+        } else if (refinementType === 'Add Examples') {
+            prompt = "Where appropriate (explanations or analyses), add a short real-world example. Keep the same JSON structure.";
+        }
+
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: `Refine the following JSON content based on this instruction: "${prompt}"\n\nJSON:\n${jsonString}`,
+            config: {
+                responseMimeType: "application/json"
+            }
+        });
+
+        if (response.text) {
+            return JSON.parse(response.text);
+        }
+        throw new Error("Refinement failed");
+    } catch (error) {
+        console.error("Error refining content:", error);
+        throw error;
+    }
+};
+
+/**
+ * Feature: Nano Banana Powered App - Image Generation
+ * Uses gemini-3-pro-image-preview for high quality cover images
+ */
+export const generateCoverImage = async (prompt: string, aspectRatio: string = "16:9"): Promise<string> => {
+    try {
+        const response = await ai.models.generateContent({
+            model: 'gemini-3-pro-image-preview',
+            contents: {
+                parts: [
+                    { text: `Create a high quality, artistic, educational illustration for a study topic about: ${prompt}. Style: Digital Art, Vibrant, Educational.` }
+                ]
+            },
+            config: {
+                imageConfig: {
+                    aspectRatio: aspectRatio as any, 
+                    imageSize: "1K"
+                }
+            }
+        });
+
+        // Loop parts to find image
+        for (const part of response.candidates[0].content.parts) {
+            if (part.inlineData) {
+                return `data:image/png;base64,${part.inlineData.data}`;
+            }
+        }
+        throw new Error("No image generated");
+    } catch (error) {
+        console.error("Image generation failed:", error);
+        throw error;
+    }
+};
+
+/**
+ * Feature: Think More When Needed - Deep Analysis
+ * Uses gemini-3-pro-preview with thinking budget
+ */
+export const deepAnalyzeContent = async (context: string): Promise<string> => {
+    try {
+        const response = await ai.models.generateContent({
+            model: "gemini-3-pro-preview",
+            contents: `Please perform a deep, structural analysis of the following educational content. 
+            Identify hidden connections, underlying mental models, and potential contradictions.
+            
+            Content Context:
+            ${context}`,
+            config: {
+                thinkingConfig: { thinkingBudget: 16000 } // Allocate thinking budget
+            }
+        });
+        
+        return response.text || "Analysis failed.";
+    } catch (error) {
+        console.error("Deep analysis failed:", error);
+        return "Sorry, I couldn't perform the deep analysis at this time.";
+    }
+}

@@ -1,5 +1,5 @@
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { KnowledgeNode } from '../types';
 
 interface KnowledgeGraphProps {
@@ -11,21 +11,96 @@ interface KnowledgeGraphProps {
     onShowAccount: () => void;
     userNodes?: KnowledgeNode[];
     onNodeClick?: (node: KnowledgeNode) => void;
+    onDeleteNode?: (node: KnowledgeNode) => void;
 }
 
-const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ onBack, onShowAbout, onExplore, onLogout, onShowFAQ, onShowAccount, userNodes = [], onNodeClick }) => {
+const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ onBack, onShowAbout, onExplore, onLogout, onShowFAQ, onShowAccount, userNodes = [], onNodeClick, onDeleteNode }) => {
     
-    // Mapping node types to colors/icons for visualization
-    const getNodeStyle = (type: string) => {
+    // Hash string to color for consistent tag coloring
+    const stringToColor = (str: string) => {
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            hash = str.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
+        return '#' + '00000'.substring(0, 6 - c.length) + c;
+    };
+
+    // Mapping node types to default styles if no tag
+    const getNodeStyle = (type: string, tag?: string) => {
+        if (tag) {
+            const hex = stringToColor(tag);
+            return {
+                style: { backgroundColor: hex, opacity: 0.9, borderColor: '#fff' },
+                className: 'shadow-[0_0_15px_rgba(255,255,255,0.4)]'
+            };
+        }
+
         switch(type) {
-            case 'Flashcard': return { bg: 'bg-map-blue/80', shadow: 'shadow-glow-blue', border: 'border-white/30', innerGlow: 'shadow-inner-glow-blue' };
-            case 'Quiz': return { bg: 'bg-map-purple/80', shadow: 'shadow-glow-purple', border: 'border-white/30', innerGlow: 'shadow-inner-glow-purple' };
-            case 'Fill-in-the-blanks': return { bg: 'bg-jade-green/80', shadow: 'shadow-glow-green', border: 'border-white/30', innerGlow: 'shadow-inner-glow-green' };
-            case 'Spot the Error': return { bg: 'bg-coral-orange/80', shadow: 'shadow-glow-orange', border: 'border-white/30', innerGlow: 'shadow-inner-glow-orange' };
-            case 'Case Study': return { bg: 'bg-warm-gold/80', shadow: 'shadow-glow-gold', border: 'border-white/30', innerGlow: 'shadow-inner-glow-gold' };
-            default: return { bg: 'bg-map-blue/80', shadow: 'shadow-glow-blue', border: 'border-white/30', innerGlow: 'shadow-inner-glow-blue' };
+            case 'Flashcard': return { className: 'bg-map-blue/80 shadow-glow-blue border-white/30 shadow-inner-glow-blue' };
+            case 'Quiz': return { className: 'bg-map-purple/80 shadow-glow-purple border-white/30 shadow-inner-glow-purple' };
+            case 'Fill-in-the-blanks': return { className: 'bg-jade-green/80 shadow-glow-green border-white/30 shadow-inner-glow-green' };
+            case 'Spot the Error': return { className: 'bg-coral-orange/80 shadow-glow-orange border-white/30 shadow-inner-glow-orange' };
+            case 'Case Study': return { className: 'bg-warm-gold/80 shadow-glow-gold border-white/30 shadow-inner-glow-gold' };
+            default: return { className: 'bg-map-blue/80 shadow-glow-blue border-white/30 shadow-inner-glow-blue' };
         }
     };
+
+    // Logic to calculate connections based on shared tags
+    const connections = useMemo(() => {
+        const links: { x1: number, y1: number, x2: number, y2: number, color: string }[] = [];
+        
+        for (let i = 0; i < userNodes.length; i++) {
+            for (let j = i + 1; j < userNodes.length; j++) {
+                const nodeA = userNodes[i];
+                const nodeB = userNodes[j];
+                
+                // Check intersection of tags
+                const commonTags = nodeA.tags?.filter(tag => nodeB.tags?.includes(tag));
+                
+                if (commonTags && commonTags.length > 0) {
+                    // Use the color of the first common tag
+                    const color = stringToColor(commonTags[0]);
+                    links.push({
+                        x1: nodeA.x,
+                        y1: nodeA.y,
+                        x2: nodeB.x,
+                        y2: nodeB.y,
+                        color: color
+                    });
+                }
+            }
+        }
+        return links;
+    }, [userNodes]);
+
+    // Calculate "Nebulas" (Cluster centers) for background glow
+    const nebulas = useMemo(() => {
+        const clusters: { [key: string]: { xSum: number, ySum: number, count: number, color: string } } = {};
+        
+        userNodes.forEach(node => {
+            if (node.tags && node.tags.length > 0) {
+                const tag = node.tags[0]; // Primary tag
+                if (!clusters[tag]) {
+                    clusters[tag] = { xSum: 0, ySum: 0, count: 0, color: stringToColor(tag) };
+                }
+                clusters[tag].xSum += node.x;
+                clusters[tag].ySum += node.y;
+                clusters[tag].count += 1;
+            }
+        });
+
+        return Object.keys(clusters).map(tag => {
+            const c = clusters[tag];
+            return {
+                tag,
+                x: c.xSum / c.count,
+                y: c.ySum / c.count,
+                color: c.color,
+                size: 25 + (c.count * 5) // Grow nebula with more items
+            };
+        });
+    }, [userNodes]);
 
     return (
         <div className="bg-deep-sea-start font-display text-text-dark min-h-screen flex flex-col">
@@ -70,8 +145,44 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ onBack, onShowAbout, on
                         </div>
                         <div className="w-full relative px-4 mt-8 flex-grow">
                             <div className="relative w-full max-w-4xl mx-auto aspect-[4/3] border border-white/5 bg-white/5 rounded-3xl overflow-hidden backdrop-blur-sm shadow-2xl">
-                                {/* Base SVG Graph - Static Backbone */}
-                                <svg className="absolute w-full h-full inset-0 pointer-events-none" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                
+                                {/* 0. Knowledge Nebulas (Background Glows) - Rendered first */}
+                                {nebulas.map((nebula, index) => (
+                                    <div 
+                                        key={`nebula-${index}`}
+                                        className="absolute rounded-full filter blur-[60px] opacity-40 animate-pulse"
+                                        style={{
+                                            top: `${nebula.y}%`,
+                                            left: `${nebula.x}%`,
+                                            width: `${nebula.size}%`,
+                                            height: `${nebula.size}%`,
+                                            transform: 'translate(-50%, -50%)',
+                                            backgroundColor: nebula.color,
+                                            zIndex: 0
+                                        }}
+                                    />
+                                ))}
+
+                                {/* 1. Dynamic Connections Layer (Rendered below nodes) */}
+                                <svg className="absolute w-full h-full inset-0 pointer-events-none z-10" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    {connections.map((link, index) => (
+                                        <line 
+                                            key={index}
+                                            x1={`${link.x1}%`} 
+                                            y1={`${link.y1}%`} 
+                                            x2={`${link.x2}%`} 
+                                            y2={`${link.y2}%`} 
+                                            stroke={link.color} 
+                                            strokeWidth="1.5" 
+                                            strokeOpacity="0.4"
+                                            strokeDasharray="5,5"
+                                            className="animate-pulse"
+                                        />
+                                    ))}
+                                </svg>
+
+                                {/* 2. Base SVG Graph - Static Background Elements */}
+                                <svg className="absolute w-full h-full inset-0 pointer-events-none z-0" fill="none" xmlns="http://www.w3.org/2000/svg">
                                     <defs>
                                         <linearGradient id="stream-grad" x1="0%" x2="100%" y1="0%" y2="0%">
                                             <stop offset="0%" stopColor="#FFD700"></stop>
@@ -79,12 +190,13 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ onBack, onShowAbout, on
                                             <stop offset="100%" stopColor="#FFD700"></stop>
                                         </linearGradient>
                                     </defs>
-                                    <path className="drop-shadow-[0_0_3px_#FFD700]" d="M 20% 50% C 30% 50%, 30% 35%, 40% 35%" fill="none" stroke="url(#stream-grad)" strokeLinecap="round" strokeOpacity="0.8" strokeWidth="2.5"></path>
-                                    <path className="drop-shadow-[0_0_3px_#FFD700]" d="M 20% 50% C 30% 50%, 30% 65%, 40% 65%" fill="none" stroke="url(#stream-grad)" strokeLinecap="round" strokeOpacity="0.8" strokeWidth="2.5"></path>
-                                    <path className="drop-shadow-[0_0_3px_#FFD700]" d="M 60% 35% C 70% 35%, 70% 50%, 80% 50%" fill="none" stroke="url(#stream-grad)" strokeLinecap="round" strokeOpacity="0.8" strokeWidth="2.5"></path>
-                                    <path className="drop-shadow-[0_0_3px_#FFD700]" d="M 60% 65% C 70% 65%, 70% 50%, 80% 50%" fill="none" stroke="url(#stream-grad)" strokeLinecap="round" strokeOpacity="0.8" strokeWidth="2.5"></path>
-                                    <path className="drop-shadow-[0_0_3px_#FFD700]" d="M 40% 35% C 45% 35%, 55% 35%, 60% 35%" fill="none" stroke="url(#stream-grad)" strokeLinecap="round" strokeOpacity="0.8" strokeWidth="2.5"></path>
-                                    <path className="drop-shadow-[0_0_3px_#FFD700]" d="M 40% 65% C 45% 65%, 55% 65%, 60% 65%" fill="none" stroke="url(#stream-grad)" strokeLinecap="round" strokeOpacity="0.8" strokeWidth="2.5"></path>
+                                    {/* Only draw static paths if user nodes are few to avoid clutter, or keep them as 'deep background' */}
+                                    {userNodes.length < 5 && (
+                                        <>
+                                            <path className="drop-shadow-[0_0_3px_#FFD700]" d="M 20% 50% C 30% 50%, 30% 35%, 40% 35%" fill="none" stroke="url(#stream-grad)" strokeLinecap="round" strokeOpacity="0.3" strokeWidth="2.5"></path>
+                                            <path className="drop-shadow-[0_0_3px_#FFD700]" d="M 60% 35% C 70% 35%, 70% 50%, 80% 50%" fill="none" stroke="url(#stream-grad)" strokeLinecap="round" strokeOpacity="0.3" strokeWidth="2.5"></path>
+                                        </>
+                                    )}
                                     <g>
                                         <circle className="animate-sparkle" cx="30%" cy="42%" fill="#FFD700" opacity="0.8" r="2"></circle>
                                         <circle className="animate-sparkle" cx="50%" cy="32%" fill="#FFD700" opacity="0.8" r="2" style={{ animationDelay: '0.5s' }}></circle>
@@ -100,28 +212,28 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ onBack, onShowAbout, on
                                 <div className="bubble-graph animate-bubble" style={{ left: '15%', top: '70%', width: '4px', height: '4px', animationDuration: '5.5s', animationDelay: '2s' }}></div>
                                 <div className="bubble-graph animate-bubble" style={{ left: '85%', top: '30%', width: '7px', height: '7px', animationDuration: '4.8s', animationDelay: '1.5s' }}></div>
 
-                                {/* Default Static Nodes */}
-                                <div className="absolute animate-subtleBob" style={{ top: '50%', left: '15%', transform: 'translate(-50%, -50%)', animationDuration: '4s' }}>
-                                    <div className="px-5 py-3 text-sm font-bold text-white bg-map-purple/80 rounded-2xl shadow-glow-purple border border-white/30 backdrop-blur-sm knowledge-map-node shadow-inner-glow-purple cursor-pointer">Unit 1</div>
-                                </div>
-                                <div className="absolute animate-subtleBob" style={{ top: '35%', left: '50%', transform: 'translate(-50%, -50%)', animationDuration: '3.5s', animationDelay: '0.5s' }}>
-                                    <div className="px-5 py-3 text-sm font-bold text-white bg-map-orange/80 rounded-2xl shadow-glow-orange border border-white/30 backdrop-blur-sm knowledge-map-node shadow-inner-glow-orange cursor-pointer">Skill A</div>
-                                </div>
-                                <div className="absolute animate-subtleBob" style={{ top: '65%', left: '50%', transform: 'translate(-50%, -50%)', animationDuration: '4.2s', animationDelay: '0.2s' }}>
-                                    <div className="px-5 py-3 text-sm font-bold text-white bg-map-orange/80 rounded-2xl shadow-glow-orange border border-white/30 backdrop-blur-sm knowledge-map-node shadow-inner-glow-orange cursor-pointer">Skill B</div>
-                                </div>
-                                <div className="absolute animate-subtleBob" style={{ top: '50%', left: '85%', transform: 'translate(-50%, -50%)', animationDuration: '3.8s', animationDelay: '0.8s' }}>
-                                    <div className="px-5 py-3 text-sm font-bold text-white bg-map-blue/80 rounded-2xl shadow-glow-blue border border-white/30 backdrop-blur-sm knowledge-map-node shadow-inner-glow-blue cursor-pointer">Unit 2</div>
-                                </div>
+                                {/* Default Static Nodes (Only if no user nodes) */}
+                                {userNodes.length === 0 && (
+                                    <>
+                                        <div className="absolute animate-subtleBob z-20" style={{ top: '50%', left: '15%', transform: 'translate(-50%, -50%)', animationDuration: '4s' }}>
+                                            <div className="px-5 py-3 text-sm font-bold text-white bg-map-purple/80 rounded-2xl shadow-glow-purple border border-white/30 backdrop-blur-sm knowledge-map-node shadow-inner-glow-purple cursor-pointer">Unit 1</div>
+                                        </div>
+                                        <div className="absolute animate-subtleBob z-20" style={{ top: '35%', left: '50%', transform: 'translate(-50%, -50%)', animationDuration: '3.5s', animationDelay: '0.5s' }}>
+                                            <div className="px-5 py-3 text-sm font-bold text-white bg-map-orange/80 rounded-2xl shadow-glow-orange border border-white/30 backdrop-blur-sm knowledge-map-node shadow-inner-glow-orange cursor-pointer">Skill A</div>
+                                        </div>
+                                    </>
+                                )}
 
-                                {/* Dynamic Generated Nodes */}
+                                {/* 3. Dynamic Generated Nodes */}
                                 {userNodes.map((node) => {
-                                    const style = getNodeStyle(node.type);
+                                    const primaryTag = node.tags && node.tags.length > 0 ? node.tags[0] : undefined;
+                                    const styleInfo = getNodeStyle(node.type, primaryTag);
+                                    
                                     return (
                                         <div 
                                             key={node.id}
                                             onClick={() => onNodeClick && onNodeClick(node)}
-                                            className="absolute animate-subtleBob cursor-pointer group"
+                                            className="absolute animate-subtleBob cursor-pointer group z-20"
                                             style={{ 
                                                 top: `${node.y}%`, 
                                                 left: `${node.x}%`, 
@@ -129,13 +241,31 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ onBack, onShowAbout, on
                                                 animationDuration: `${3 + Math.random() * 2}s` 
                                             }}
                                         >
-                                            <div className={`px-4 py-2 text-sm font-bold text-white ${style.bg} rounded-2xl ${style.shadow} border ${style.border} backdrop-blur-sm knowledge-map-node ${style.innerGlow} flex items-center gap-2 hover:scale-110 transition-transform`}>
+                                            <div 
+                                                className={`px-4 py-2 text-sm font-bold text-white rounded-2xl border backdrop-blur-sm knowledge-map-node flex items-center gap-2 hover:scale-110 transition-transform ${styleInfo.className || ''}`}
+                                                style={styleInfo.style}
+                                            >
                                                 <span className="truncate max-w-[100px]">{node.title}</span>
-                                                <div className="size-2 rounded-full bg-green-400 animate-pulse" title="New"></div>
+                                                <div className="size-2 rounded-full bg-white animate-pulse" title="Active"></div>
+                                                
+                                                {/* Delete Button */}
+                                                <button 
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        onDeleteNode && onDeleteNode(node);
+                                                    }}
+                                                    className="absolute -top-2 -right-2 w-5 h-5 bg-red-500 rounded-full text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-600 shadow-md z-50"
+                                                    title="Xóa thẻ"
+                                                >
+                                                    <span className="material-symbols-outlined text-[12px]">close</span>
+                                                </button>
                                             </div>
-                                            {/* Tooltip */}
-                                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-black/80 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-20">
-                                                Click để học: {node.type}
+                                            {/* Tooltip showing Tags */}
+                                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-black/80 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-30 shadow-lg">
+                                                <p className="font-bold mb-1">{node.type}</p>
+                                                {node.tags && node.tags.length > 0 && (
+                                                    <p className="text-sky-300">{node.tags.join(', ')}</p>
+                                                )}
                                             </div>
                                         </div>
                                     );

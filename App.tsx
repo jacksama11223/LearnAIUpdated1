@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import Header from './components/Header';
 import Footer from './components/Footer';
 import Hero from './components/Hero';
@@ -34,6 +34,7 @@ import FAQ from './components/FAQ';
 import Account from './components/Account';
 import LearningModal from './components/LearningModal';
 import { KnowledgeNode } from './types';
+import { getGlobalStats } from './services/sm2Service';
 
 type ViewState = 'landing' | 'dashboard' | 'tutor' | 'alchemy' | 'knowledge-graph' | 'media' | 'quick-learn' | 'digest' | 'video' | 'exam' | 'about' | 'vision' | 'mission' | 'story' | 'team' | 'contact' | 'explore-graph' | 'explore-search' | 'explore-category' | 'explore-3d' | 'explore-topic' | 'explore-difficulty' | 'explore-skill' | 'faq' | 'account';
 
@@ -46,6 +47,16 @@ function App() {
   const [userNodes, setUserNodes] = useState<KnowledgeNode[]>([]);
   // State for selected learning node
   const [selectedNode, setSelectedNode] = useState<KnowledgeNode | null>(null);
+  
+  // State for Deep Dive context (sending content to Tutor)
+  const [tutorContext, setTutorContext] = useState<string>('');
+
+  // Playlist / Queue State
+  const [learningQueue, setLearningQueue] = useState<KnowledgeNode[]>([]);
+  const [currentPlaylistIndex, setCurrentPlaylistIndex] = useState(0);
+
+  // Calculate stats for Dashboard
+  const stats = useMemo(() => getGlobalStats(userNodes), [userNodes]);
 
   const handleStart = () => {
     // If we want "Học ngay" to trigger login on landing
@@ -83,6 +94,7 @@ function App() {
         setView('media');
     } else if (feature === 'tutor') {
         setView('tutor');
+        setTutorContext(''); // Reset context when manually opening tutor
     } else if (feature === 'quick-learn') {
         setView('quick-learn');
     } else if (feature === 'digest') {
@@ -94,6 +106,7 @@ function App() {
     } else {
         // Default to tutor for other features for now
         setView('tutor');
+        setTutorContext('');
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -209,10 +222,105 @@ function App() {
   // Logic to update an existing node (e.g. after learning)
   const handleUpdateNode = (updatedNode: KnowledgeNode) => {
       setUserNodes(prev => prev.map(n => n.id === updatedNode.id ? updatedNode : n));
+      
+      // Also update it in queue if present
+      setLearningQueue(prev => prev.map(n => n.id === updatedNode.id ? updatedNode : n));
+      if (selectedNode && selectedNode.id === updatedNode.id) {
+          setSelectedNode(updatedNode);
+      }
   };
 
   const handleNodeClick = (node: KnowledgeNode) => {
       setSelectedNode(node);
+      // Reset queue if single node clicked
+      setLearningQueue([]); 
+      setCurrentPlaylistIndex(0);
+  };
+
+  // Handler for Deep Dive from LearningModal
+  const handleDeepDive = (context: string) => {
+      setTutorContext(context);
+      setSelectedNode(null); // Close learning modal
+      setView('tutor');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // --- Playlist & Merge & Delete Handlers ---
+
+  const handleStartPlaylist = (nodes: KnowledgeNode[]) => {
+      if (nodes.length === 0) return;
+      setLearningQueue(nodes);
+      setCurrentPlaylistIndex(0);
+      setSelectedNode(nodes[0]);
+  };
+
+  const handleNextNode = () => {
+      if (currentPlaylistIndex < learningQueue.length - 1) {
+          const nextIndex = currentPlaylistIndex + 1;
+          setCurrentPlaylistIndex(nextIndex);
+          setSelectedNode(learningQueue[nextIndex]);
+      } else {
+          // End of playlist
+          setSelectedNode(null);
+          setLearningQueue([]);
+      }
+  };
+
+  const handleMergeNodes = (nodesToMerge: KnowledgeNode[]) => {
+      if (nodesToMerge.length < 2) return;
+
+      const mergedTitle = `Tổng hợp: ${nodesToMerge[0].title} & ${nodesToMerge.length - 1} khác`;
+      
+      // Combine all content arrays
+      const mergedData: KnowledgeNode['data'] = {
+          flashcards: nodesToMerge.flatMap(n => n.data?.flashcards || []),
+          quiz: nodesToMerge.flatMap(n => n.data?.quiz || []),
+          fillInBlanks: nodesToMerge.flatMap(n => n.data?.fillInBlanks || []),
+          spotErrors: nodesToMerge.flatMap(n => n.data?.spotErrors || []),
+          caseStudies: nodesToMerge.flatMap(n => n.data?.caseStudies || []),
+          summary: nodesToMerge.map(n => n.data?.summary).filter(Boolean).join('\n\n---\n\n')
+      };
+
+      // Combine and unique tags
+      const allTags = nodesToMerge.flatMap(n => n.tags || []);
+      const uniqueTags = Array.from(new Set(allTags));
+
+      // Calculate centroid position for new node
+      const avgX = nodesToMerge.reduce((sum, n) => sum + n.x, 0) / nodesToMerge.length;
+      const avgY = nodesToMerge.reduce((sum, n) => sum + n.y, 0) / nodesToMerge.length;
+
+      // Determine type (Mixed if contains multiple types, else specific type)
+      // For now, we will use a specific type 'Mixed' to let LearningModal know it should render all content.
+      
+      const newNode: KnowledgeNode = {
+          id: Date.now().toString(),
+          title: mergedTitle,
+          type: 'Mixed', // Set type to Mixed so LearningModal knows to look for all data types
+          status: 'new',
+          tags: uniqueTags,
+          x: avgX,
+          y: avgY,
+          timestamp: new Date(),
+          data: mergedData,
+          imageUrl: nodesToMerge[0].imageUrl // Inherit image from first node or generate new later
+      };
+
+      // Keep old nodes, add Super Node
+      setUserNodes(prev => [...prev, newNode]);
+      alert(`Đã hợp nhất ${nodesToMerge.length} bài học thành công!`);
+  };
+
+  const handleDeleteNodes = (nodesToDelete: KnowledgeNode[]) => {
+      if (window.confirm(`Bạn có chắc muốn xóa ${nodesToDelete.length} nốt tri thức không?`)) {
+          const idsToDelete = new Set(nodesToDelete.map(n => n.id));
+          setUserNodes(prev => prev.filter(n => !idsToDelete.has(n.id)));
+      }
+  };
+
+  const handleDeleteNode = (nodeToDelete: KnowledgeNode) => {
+      if (window.confirm(`Bạn có chắc muốn xóa nốt "${nodeToDelete.title}" không?`)) {
+          setUserNodes(prev => prev.filter(n => n.id !== nodeToDelete.id));
+      }
   };
 
   // Logic to determine if global header/footer should be shown
@@ -241,9 +349,14 @@ function App() {
       {/* Learning Modal for Selected Node */}
       {selectedNode && (
           <LearningModal 
+              key={selectedNode.id}
               node={selectedNode} 
               onClose={() => setSelectedNode(null)}
               onUpdateNode={handleUpdateNode}
+              onDeepDive={handleDeepDive}
+              playlistTotal={learningQueue.length > 0 ? learningQueue.length : undefined}
+              playlistCurrent={learningQueue.length > 0 ? currentPlaylistIndex + 1 : undefined}
+              onNextNode={learningQueue.length > 0 && currentPlaylistIndex < learningQueue.length - 1 ? handleNextNode : undefined}
           />
       )}
 
@@ -264,6 +377,7 @@ function App() {
             onShowAbout={handleShowAbout}
             onShowFAQ={handleShowFAQ}
             onShowAccount={handleShowAccount}
+            stats={stats}
           />
         )}
 
@@ -277,7 +391,16 @@ function App() {
         )}
 
         {view === 'tutor' && (
-          <SocraticTutor onBack={handleGoBackToDashboard} onShowAbout={handleShowAbout} onLogout={handleLogout} onShowFAQ={handleShowFAQ} onShowAccount={handleShowAccount} />
+          <SocraticTutor 
+            onBack={handleGoBackToDashboard} 
+            onShowAbout={handleShowAbout} 
+            onLogout={handleLogout} 
+            onShowFAQ={handleShowFAQ} 
+            onShowAccount={handleShowAccount}
+            initialMessage={tutorContext}
+            userNodes={userNodes}
+            stats={stats}
+          />
         )}
 
         {view === 'alchemy' && (
@@ -302,6 +425,7 @@ function App() {
             onShowAccount={handleShowAccount}
             userNodes={userNodes}
             onNodeClick={handleNodeClick}
+            onDeleteNode={handleDeleteNode}
           />
         )}
 
@@ -317,6 +441,9 @@ function App() {
             onShowAccount={handleShowAccount}
             userNodes={userNodes}
             onNodeClick={handleNodeClick}
+            onStartPlaylist={handleStartPlaylist}
+            onMergeNodes={handleMergeNodes}
+            onDeleteNodes={handleDeleteNodes}
           />
         )}
 

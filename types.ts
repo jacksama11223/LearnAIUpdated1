@@ -20,12 +20,38 @@ export interface ChatMessage {
   timestamp: Date;
 }
 
-export type LearningMethod = 'Flashcard' | 'Quiz' | 'Fill-in-the-blanks' | 'Spot the Error' | 'Case Study';
+export interface SavedChatSession {
+  id: string;
+  title: string;
+  date: string;
+  messages: ChatMessage[];
+  personaId: string;
+}
+
+export interface TutorPersona {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  systemInstruction: string;
+  color: string;
+}
+
+export type LearningMethod = 'Flashcard' | 'Quiz' | 'Fill-in-the-blanks' | 'Spot the Error' | 'Case Study' | 'Mixed';
+
+// SM-2 Data Structure for individual items
+export interface SM2Data {
+  repetitions: number;
+  interval: number;
+  efactor: number;
+  nextReviewDate: string; // ISO string for easier serialization
+}
 
 // Content structures
 export interface FlashcardItem {
   front: string;
   back: string;
+  sm2: SM2Data;
 }
 
 export interface QuizItem {
@@ -33,23 +59,27 @@ export interface QuizItem {
   options: string[];
   correctAnswer: number; // Index of the correct option
   explanation: string;
+  sm2: SM2Data;
 }
 
 export interface FillBlankItem {
   sentence: string; // The sentence with a blank (represented by underscores)
   answer: string;   // The word that fills the blank
+  sm2: SM2Data;
 }
 
 export interface SpotErrorItem {
   text: string;       // The sentence containing an error
   error: string;      // Explanation of the error
   correction: string; // The corrected sentence
+  sm2: SM2Data;
 }
 
 export interface CaseStudyItem {
   scenario: string;
   question: string;
   analysis: string;
+  sm2: SM2Data;
 }
 
 export interface KnowledgeNode {
@@ -57,19 +87,15 @@ export interface KnowledgeNode {
   title: string;
   type: LearningMethod;
   status: 'new' | 'learning' | 'mastered';
-  x: number; // Coordinate for graph (percentage)
-  y: number; // Coordinate for graph (percentage)
+  tags?: string[]; // Smart clustering tags
+  x: number; // Coordinate for graph (percentage or relative)
+  y: number; // Coordinate for graph (percentage or relative)
   sourceUrl?: string;
+  imageUrl?: string; // AI Generated Cover Image
   timestamp: Date;
   
-  // SM-2 Spaced Repetition Data
-  sm2?: {
-    repetitions: number; // n: number of successful recalls
-    interval: number;    // I: days until next review
-    efactor: number;     // EF: easiness factor (min 1.3, default 2.5)
-    nextReviewDate: Date; // Calculated date for next review
-    lastReviewDate?: Date;
-  };
+  // Manual connections created by user (Graph View feature)
+  connectedNodeIds?: string[];
 
   // Store the generated AI content here
   data?: {

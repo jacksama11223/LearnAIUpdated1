@@ -1,23 +1,22 @@
 
-import { KnowledgeNode } from "../types";
+import { KnowledgeNode, SM2Data } from "../types";
 
 /**
- * SuperMemo-2 (SM-2) Algorithm Implementation
+ * SuperMemo-2 (SM-2) Algorithm Implementation for Individual Items
  * 
  * Quality (q) input:
- * 5 - Perfect response
- * 4 - Correct response after a hesitation
- * 3 - Correct response recalled with serious difficulty
- * 2 - Incorrect response; where the correct one seemed easy to recall
- * 1 - Incorrect response; the correct one remembered
- * 0 - Complete blackout.
+ * 5 - Perfect response (Dễ)
+ * 4 - Correct response after a hesitation (Được)
+ * 3 - Correct response recalled with serious difficulty (Khó)
+ * 2 - Incorrect response; where the correct one seemed easy to recall (Quên)
+ * 1 - Incorrect response; the correct one remembered (Quên)
+ * 0 - Complete blackout (Quên)
  */
 
-export const calculateSM2 = (node: KnowledgeNode, quality: number): KnowledgeNode => {
-    // Default values if not present
-    let reps = node.sm2?.repetitions || 0;
-    let interval = node.sm2?.interval || 0;
-    let ef = node.sm2?.efactor || 2.5;
+export const calculateItemSM2 = (currentSM2: SM2Data, quality: number): SM2Data => {
+    let reps = currentSM2.repetitions;
+    let interval = currentSM2.interval;
+    let ef = currentSM2.efactor;
 
     // 1. Update E-Factor
     // EF' = EF + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02))
@@ -25,9 +24,14 @@ export const calculateSM2 = (node: KnowledgeNode, quality: number): KnowledgeNod
     let newEf = ef + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
     if (newEf < 1.3) newEf = 1.3;
 
-    // 2. Update Repetitions & Interval
-    if (quality >= 3) {
-        // Correct response
+    // 2. Update Repetitions & Interval (OPTIMIZED FOR AGGRESSIVE LEARNING)
+    
+    // User Requirement: 
+    // - Weak/Unsteady (Quality < 4) -> Appear NOW (Today).
+    // - Good/Easy (Quality >= 4) -> Future (Tomorrow+).
+
+    if (quality >= 4) {
+        // Good or Easy: Move to Future (Tomorrow or later)
         if (reps === 0) {
             interval = 1;
         } else if (reps === 1) {
@@ -37,53 +41,135 @@ export const calculateSM2 = (node: KnowledgeNode, quality: number): KnowledgeNod
         }
         reps++;
     } else {
-        // Incorrect response - Reset
-        reps = 0;
-        interval = 1; 
-        // Note: In strict SM-2, EF doesn't change on failure, but some variations lower it. 
-        // We keep the modified EF from step 1 to punish hard items.
+        // Hard, Wrong, or Blackout: Keep it for TODAY (Immediate Review)
+        // We reset interval to 0 so it stays in the "Due" bucket.
+        reps = 0; 
+        interval = 0; // 0 days added = Due Today
     }
 
     // 3. Calculate Next Review Date
     const nextDate = new Date();
+    // Add interval days. If interval is 0, it stays Today.
     nextDate.setDate(nextDate.getDate() + interval);
 
-    // 4. Determine Status for UI
-    let newStatus: 'new' | 'learning' | 'mastered' = 'learning';
-    if (interval > 21) newStatus = 'mastered'; // Arbitrary threshold for "Mastered"
-    if (reps === 0) newStatus = 'new'; // Reset to new if failed
-
     return {
-        ...node,
-        status: newStatus,
-        sm2: {
-            repetitions: reps,
-            interval: interval,
-            efactor: newEf,
-            nextReviewDate: nextDate,
-            lastReviewDate: new Date()
-        }
+        repetitions: reps,
+        interval: interval,
+        efactor: newEf,
+        nextReviewDate: nextDate.toISOString()
     };
 };
 
-// Helpers for categorizing nodes in the UI
-export const getReviewStatus = (node: KnowledgeNode) => {
-    if (!node.sm2) return 'new'; // Should have been initialized, but fallback
+/**
+ * Helper to determine the status of a Node based on its internal items.
+ * A node is "due" ONLY if AT LEAST ONE item inside it is due today or in the past.
+ * Categories are determined by the count of 'struggling' items among those due.
+ */
+export const getNodeAggregateStatus = (node: KnowledgeNode): 'due' | 'future' | 'weak' | 'learning' => {
+    if (!node.data) return 'future';
+
+    const allItems: SM2Data[] = [];
+    if (node.data.flashcards) node.data.flashcards.forEach(i => allItems.push(i.sm2));
+    if (node.data.quiz) node.data.quiz.forEach(i => allItems.push(i.sm2));
+    if (node.data.fillInBlanks) node.data.fillInBlanks.forEach(i => allItems.push(i.sm2));
+    if (node.data.spotErrors) node.data.spotErrors.forEach(i => allItems.push(i.sm2));
+    if (node.data.caseStudies) node.data.caseStudies.forEach(i => allItems.push(i.sm2));
+
+    if (allItems.length === 0) return 'future';
 
     const now = new Date();
-    const reviewDate = new Date(node.sm2.nextReviewDate);
+    const todayStart = new Date(now.setHours(0,0,0,0)).getTime();
+
+    // Filter items that are strictly due today or in the past
+    const dueItems = allItems.filter(sm2 => {
+        const reviewDate = new Date(sm2.nextReviewDate).setHours(0,0,0,0);
+        return reviewDate <= todayStart;
+    });
+
+    // If no items are due (all marked easy/good and pushed to future), return future.
+    if (dueItems.length === 0) return 'future';
+
+    // Count items that define "struggle" within the DUE set.
+    // E-Factor < 2.5 means it has been marked Hard/Again/Wrong reducing ease.
+    // Repetitions < 3 means it's still in early learning stages or recently reset.
+    const struggleCount = dueItems.filter(i => i.efactor < 2.5 || i.repetitions < 3).length;
+
+    // Logic:
+    // > 5 struggle items -> Weak (Còn yếu)
+    // > 3 struggle items -> Learning (Chưa vững)
+    // Else -> Due (Đến hạn)
+    if (struggleCount > 5) return 'weak';
+    if (struggleCount > 3) return 'learning';
     
-    // Normalize time to start of day for comparison
-    const todayStart = new Date(now.setHours(0,0,0,0));
-    const reviewStart = new Date(reviewDate.setHours(0,0,0,0));
+    return 'due';
+};
 
-    if (reviewStart <= todayStart) return 'due'; // Đến hạn
+/**
+ * Helper to count actionable items in a node.
+ * Strictly counts items where Next Review Date <= Today.
+ */
+export const getDueItemsCount = (node: KnowledgeNode): number => {
+    if (!node.data) return 0;
     
-    // "Weak" definition: Failed recently (reps = 0) but not due today (should theoretically be due 1 day later)
-    // Or EF is very low. Let's use low EF for "Weak"
-    if (node.sm2.efactor < 1.5) return 'weak'; 
+    const now = new Date();
+    const todayStart = new Date(now.setHours(0,0,0,0)).getTime();
+    let count = 0;
 
-    if (node.sm2.repetitions < 3) return 'learning'; // Chưa vững
+    const check = (sm2: SM2Data) => {
+        const reviewDate = new Date(sm2.nextReviewDate).setHours(0,0,0,0);
+        // Strictly check date. 
+        if (reviewDate <= todayStart) {
+            count++;
+        }
+    };
 
-    return 'future'; // Chưa đến hạn
+    if (node.data.flashcards) node.data.flashcards.forEach(i => check(i.sm2));
+    if (node.data.quiz) node.data.quiz.forEach(i => check(i.sm2));
+    if (node.data.fillInBlanks) node.data.fillInBlanks.forEach(i => check(i.sm2));
+    if (node.data.spotErrors) node.data.spotErrors.forEach(i => check(i.sm2));
+    if (node.data.caseStudies) node.data.caseStudies.forEach(i => check(i.sm2));
+
+    return count;
+}
+
+/**
+ * Calculates global stats across all nodes for the dashboard.
+ */
+export const getGlobalStats = (nodes: KnowledgeNode[]) => {
+    const now = new Date();
+    const todayStart = new Date(now.setHours(0,0,0,0)).getTime();
+
+    let dueCount = 0;
+    let weakCount = 0;
+    let newCount = 0; // Using 'repetitions === 0' as proxy for 'Unfinished/New'
+
+    const processItem = (sm2: SM2Data) => {
+        const reviewDate = new Date(sm2.nextReviewDate).setHours(0,0,0,0);
+        
+        // Count Due
+        if (reviewDate <= todayStart) {
+            dueCount++;
+            
+            // Count Weak (within due items)
+            if (sm2.efactor < 2.5) {
+                weakCount++;
+            }
+        }
+
+        // Count New/Unfinished (Total pool)
+        if (sm2.repetitions === 0) {
+            newCount++;
+        }
+    };
+
+    nodes.forEach(node => {
+        if (!node.data) return;
+        if (node.data.flashcards) node.data.flashcards.forEach(i => processItem(i.sm2));
+        if (node.data.quiz) node.data.quiz.forEach(i => processItem(i.sm2));
+        if (node.data.fillInBlanks) node.data.fillInBlanks.forEach(i => processItem(i.sm2));
+        if (node.data.spotErrors) node.data.spotErrors.forEach(i => processItem(i.sm2));
+        if (node.data.caseStudies) node.data.caseStudies.forEach(i => processItem(i.sm2));
+    });
+
+    return { due: dueCount, weak: weakCount, new: newCount };
 };

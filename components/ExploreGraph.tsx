@@ -1,7 +1,9 @@
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { KnowledgeNode } from '../types';
-import { getReviewStatus } from '../services/sm2Service';
+import { getNodeAggregateStatus } from '../services/sm2Service';
+import { deepAnalyzeContent, generateLearningPath } from '../services/geminiService';
+import NavigationDock from './NavigationDock';
 
 interface ExploreGraphProps {
     onBack: () => void;
@@ -13,391 +15,678 @@ interface ExploreGraphProps {
     onLogout: () => void;
     onShowFAQ: () => void;
     onShowAccount: () => void;
-    userNodes?: KnowledgeNode[]; // Pass user nodes to explore
+    userNodes?: KnowledgeNode[];
     onNodeClick?: (node: KnowledgeNode) => void;
+    onStartPlaylist?: (nodes: KnowledgeNode[]) => void;
+    onMergeNodes?: (nodes: KnowledgeNode[]) => void;
+    onDeleteNodes?: (nodes: KnowledgeNode[]) => void;
 }
 
-const ExploreGraph: React.FC<ExploreGraphProps> = ({ onBack, onShowAbout, onExplore, onSearch, onCategory, on3DMode, onLogout, onShowFAQ, onShowAccount, userNodes = [], onNodeClick }) => {
+// Physics Constants
+const REPULSION_FORCE = 800;
+const SPRING_LENGTH = 150;
+const SPRING_STRENGTH = 0.05;
+const CENTER_GRAVITY = 0.0005;
+const DAMPING = 0.85; // Friction to stop movement eventually
+const VELOCITY_DECAY = 0.96; // Air resistance
+
+type FilterMode = 'all' | 'due' | 'weak' | 'mastered';
+
+const ExploreGraph: React.FC<ExploreGraphProps> = ({ onBack, onSearch, onCategory, on3DMode, onLogout, onShowAccount, userNodes = [], onNodeClick, onStartPlaylist, onMergeNodes, onDeleteNodes }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const [selectedCategory, setSelectedCategory] = useState<'due' | 'future' | 'weak' | 'learning' | 'all'>('all');
+    const containerRef = useRef<HTMLDivElement>(null);
+    
+    // Graph State
+    const [nodes, setNodes] = useState<any[]>([]);
+    const [links, setLinks] = useState<any[]>([]);
+    
+    // Interaction State
+    const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+    const [draggedNode, setDraggedNode] = useState<string | null>(null);
+    const [linkingSource, setLinkingSource] = useState<string | null>(null);
+    const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+    
+    // Selection State
+    const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
+    
+    // Analysis State
+    const [isThinking, setIsThinking] = useState(false);
+    const [analysisResult, setAnalysisResult] = useState<string | null>(null);
 
-    // Categorize nodes for the HUD
-    const dueNodes = userNodes.filter(n => getReviewStatus(n) === 'due');
-    const futureNodes = userNodes.filter(n => getReviewStatus(n) === 'future');
-    const weakNodes = userNodes.filter(n => getReviewStatus(n) === 'weak');
-    const learningNodes = userNodes.filter(n => getReviewStatus(n) === 'learning');
+    // Feature: Spectral Filters
+    const [filterMode, setFilterMode] = useState<FilterMode>('all');
 
-    // Filter displayed nodes based on selection
-    const displayNodes = selectedCategory === 'all' ? userNodes : 
-                         selectedCategory === 'due' ? dueNodes :
-                         selectedCategory === 'future' ? futureNodes :
-                         selectedCategory === 'weak' ? weakNodes : learningNodes;
+    // Feature: AI Pathfinder
+    const [isPathfinding, setIsPathfinding] = useState(false);
+    const [pathModeTargetId, setPathModeTargetId] = useState<string | null>(null);
+    const [suggestedPathIds, setSuggestedPathIds] = useState<string[]>([]);
 
+    // Helper for node color (needs to be available for useEffect)
+    const getNodeColor = (node: KnowledgeNode) => {
+        // Tag-based coloring
+        const tag = node.tags && node.tags.length > 0 ? node.tags[0] : 'General';
+        let hash = 0;
+        for (let i = 0; i < tag.length; i++) hash = tag.charCodeAt(i) + ((hash << 5) - hash);
+        const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
+        return '#' + '00000'.substring(0, 6 - c.length) + c;
+    };
+
+    // Initialize Simulation Data - Optimized for stability
+    useEffect(() => {
+        if (!containerRef.current) return;
+        const { width, height } = containerRef.current.getBoundingClientRect();
+
+        setNodes(prevNodes => {
+            return userNodes.map(n => {
+                // Try to find existing node state to preserve physics
+                const existing = prevNodes.find(pn => pn.id === n.id);
+                
+                if (existing) {
+                    return {
+                        ...existing, // Keep x, y, vx, vy
+                        ...n, // Update data like title, tags, status, but override old physics with existing physics
+                        // Ensure we use the latest visual properties if changed
+                        color: getNodeColor(n),
+                        radius: 8 + (n.tags?.length || 0) * 1.5,
+                        status: getNodeAggregateStatus(n)
+                    };
+                }
+
+                // New node initialization
+                return {
+                    ...n,
+                    // Map percentage coordinates to absolute pixels if it's the first load
+                    x: (n.x / 100) * width || Math.random() * width,
+                    y: (n.y / 100) * height || Math.random() * height,
+                    vx: (Math.random() - 0.5) * 2, // Velocity X
+                    vy: (Math.random() - 0.5) * 2, // Velocity Y
+                    radius: 8 + (n.tags?.length || 0) * 1.5, // Size based on connectivity/importance
+                    color: getNodeColor(n),
+                    status: getNodeAggregateStatus(n)
+                };
+            });
+        });
+    }, [userNodes]);
+
+    // Recalculate Links when nodes change
+    useEffect(() => {
+        const newLinks: any[] = [];
+        
+        // 1. Tag-based connections (Automatic)
+        for (let i = 0; i < nodes.length; i++) {
+            for (let j = i + 1; j < nodes.length; j++) {
+                const nodeA = nodes[i];
+                const nodeB = nodes[j];
+                const commonTags = nodeA.tags?.filter((t: string) => nodeB.tags?.includes(t));
+                if (commonTags && commonTags.length > 0) {
+                    newLinks.push({ source: nodeA.id, target: nodeB.id, type: 'tag' });
+                }
+            }
+        }
+
+        // 2. Manual connections (User created)
+        nodes.forEach(node => {
+            if (node.connectedNodeIds) {
+                node.connectedNodeIds.forEach((targetId: string) => {
+                    // Check if target exists in current nodes
+                    if (nodes.find(n => n.id === targetId)) {
+                         // Check distinct link existence
+                        if (!newLinks.find(l => (l.source === node.id && l.target === targetId) || (l.source === targetId && l.target === node.id))) {
+                            newLinks.push({ source: node.id, target: targetId, type: 'manual' });
+                        }
+                    }
+                });
+            }
+        });
+
+        // 3. AI Pathfinder Connections (Visual Overlay)
+        if (suggestedPathIds.length > 1) {
+            for (let i = 0; i < suggestedPathIds.length - 1; i++) {
+                const sourceId = suggestedPathIds[i];
+                const targetId = suggestedPathIds[i+1];
+                // Only add visual link if nodes exist
+                if (nodes.find(n => n.id === sourceId) && nodes.find(n => n.id === targetId)) {
+                     newLinks.push({ source: sourceId, target: targetId, type: 'path' });
+                }
+            }
+        }
+
+        setLinks(newLinks);
+    }, [nodes, suggestedPathIds]);
+
+    // Physics Loop & Rendering
     useEffect(() => {
         const canvas = canvasRef.current;
         if (!canvas) return;
-
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
         let animationFrameId: number;
-        let particles: Particle[] = [];
-        let mouse = { x: -1000, y: -1000 };
-
-        // Configuration
-        const PARTICLE_COUNT = 90; // Số lượng hạt
-        const CONNECT_DISTANCE = 110; // Khoảng cách kết nối
-        const MOUSE_RADIUS = 150; // Vùng ảnh hưởng của chuột
 
         const resize = () => {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
+            if (containerRef.current) {
+                canvas.width = containerRef.current.clientWidth;
+                canvas.height = containerRef.current.clientHeight;
+            }
         };
         window.addEventListener('resize', resize);
         resize();
 
-        const handleMouseMove = (e: MouseEvent) => {
-            const rect = canvas.getBoundingClientRect();
-            mouse.x = e.clientX - rect.left;
-            mouse.y = e.clientY - rect.top;
-        };
-        window.addEventListener('mousemove', handleMouseMove);
-
-        class Particle {
-            x: number;
-            y: number;
-            vx: number;
-            vy: number;
-            size: number;
-            color: string;
-
-            constructor() {
-                this.x = Math.random() * canvas.width;
-                this.y = Math.random() * canvas.height;
-                this.vx = (Math.random() - 0.5) * 0.5; // Tốc độ chậm
-                this.vy = (Math.random() - 0.5) * 0.5;
-                this.size = Math.random() * 2 + 1;
-                // Màu sắc theo theme Neon: Cyan và Yellow
-                const colors = ['rgba(34, 211, 238,', 'rgba(240, 225, 74,']; 
-                this.color = colors[Math.floor(Math.random() * colors.length)];
-            }
-
-            update() {
-                this.x += this.vx;
-                this.y += this.vy;
-
-                // Bounce off edges
-                if (this.x < 0 || this.x > canvas.width) this.vx *= -1;
-                if (this.y < 0 || this.y > canvas.height) this.vy *= -1;
-
-                // Mouse interaction
-                const dx = mouse.x - this.x;
-                const dy = mouse.y - this.y;
-                const distance = Math.sqrt(dx * dx + dy * dy);
-                
-                if (distance < MOUSE_RADIUS) {
-                    const forceDirectionX = dx / distance;
-                    const forceDirectionY = dy / distance;
-                    const maxDistance = MOUSE_RADIUS;
-                    const force = (maxDistance - distance) / maxDistance;
-                    const directionX = forceDirectionX * force * 0.5; 
-                    const directionY = forceDirectionY * force * 0.5;
-                    
-                    // Hạt bị hút nhẹ về phía chuột
-                    this.x += directionX;
-                    this.y += directionY;
-                }
-            }
-
-            draw() {
-                if (!ctx) return;
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-                ctx.fillStyle = `${this.color} 0.8)`;
-                ctx.shadowBlur = 5;
-                ctx.shadowColor = `${this.color} 0.5)`;
-                ctx.fill();
-                ctx.shadowBlur = 0;
-            }
-        }
-
-        const init = () => {
-            particles = [];
-            for (let i = 0; i < PARTICLE_COUNT; i++) {
-                particles.push(new Particle());
-            }
-        };
-
         const animate = () => {
             if (!ctx) return;
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const width = canvas.width;
+            const height = canvas.height;
+            const center = { x: width / 2, y: height / 2 };
 
-            for (let i = 0; i < particles.length; i++) {
-                particles[i].update();
-                particles[i].draw();
+            ctx.clearRect(0, 0, width, height);
 
-                // Connect particles to each other (Mạng lưới tri thức)
-                for (let j = i; j < particles.length; j++) {
-                    const dx = particles[i].x - particles[j].x;
-                    const dy = particles[i].y - particles[j].y;
-                    const distance = Math.sqrt(dx * dx + dy * dy);
+            // 1. Calculate Forces
+            nodes.forEach(node => {
+                if (node.id === draggedNode) return; // Don't apply physics to dragged node
 
-                    if (distance < CONNECT_DISTANCE) {
-                        ctx.beginPath();
-                        const opacity = 1 - (distance / CONNECT_DISTANCE);
-                        ctx.strokeStyle = `${particles[i].color} ${opacity * 0.2})`; // Đường nối mờ
-                        ctx.lineWidth = 0.5;
-                        ctx.moveTo(particles[i].x, particles[i].y);
-                        ctx.lineTo(particles[j].x, particles[j].y);
-                        ctx.stroke();
+                let fx = 0, fy = 0;
+
+                // Repulsion (Coulomb) - Push apart
+                nodes.forEach(other => {
+                    if (node.id === other.id) return;
+                    const dx = node.x - other.x;
+                    const dy = node.y - other.y;
+                    let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                    if (dist < 300) { // Only affect nearby
+                        const force = REPULSION_FORCE / (dist * dist);
+                        fx += (dx / dist) * force;
+                        fy += (dy / dist) * force;
                     }
+                });
+
+                // Attraction to Center (Gravity) - Keep in view
+                const dxCenter = center.x - node.x;
+                const dyCenter = center.y - node.y;
+                fx += dxCenter * CENTER_GRAVITY;
+                fy += dyCenter * CENTER_GRAVITY;
+
+                // Apply Force to Velocity
+                node.vx = (node.vx + fx) * VELOCITY_DECAY;
+                node.vy = (node.vy + fy) * VELOCITY_DECAY;
+            });
+
+            // Link Attraction (Spring)
+            links.forEach(link => {
+                const source = nodes.find(n => n.id === link.source);
+                const target = nodes.find(n => n.id === link.target);
+                if (!source || !target) return;
+
+                const dx = target.x - source.x;
+                const dy = target.y - source.y;
+                const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                
+                // Spring force: proportional to displacement from resting length
+                const force = (dist - SPRING_LENGTH) * SPRING_STRENGTH;
+                const fx = (dx / dist) * force;
+                const fy = (dy / dist) * force;
+
+                if (source.id !== draggedNode) {
+                    source.vx += fx;
+                    source.vy += fy;
+                }
+                if (target.id !== draggedNode) {
+                    target.vx -= fx;
+                    target.vy -= fy;
+                }
+            });
+
+            // 2. Update Positions & Draw Lines
+            // Draw links first (behind nodes)
+            links.forEach(link => {
+                const source = nodes.find(n => n.id === link.source);
+                const target = nodes.find(n => n.id === link.target);
+                if (!source || !target) return;
+
+                // Check filter visibility for links: both nodes must be visible
+                const sourceVisible = filterMode === 'all' || 
+                                      (filterMode === 'due' && source.status === 'due') || 
+                                      (filterMode === 'weak' && source.status === 'weak') ||
+                                      (filterMode === 'mastered' && source.status === 'future');
+                const targetVisible = filterMode === 'all' || 
+                                      (filterMode === 'due' && target.status === 'due') || 
+                                      (filterMode === 'weak' && target.status === 'weak') ||
+                                      (filterMode === 'mastered' && target.status === 'future');
+
+                ctx.globalAlpha = (sourceVisible && targetVisible) ? 1 : 0.05;
+
+                ctx.beginPath();
+                ctx.moveTo(source.x, source.y);
+                ctx.lineTo(target.x, target.y);
+                
+                if (link.type === 'path') {
+                    // Pathfinder link
+                    ctx.strokeStyle = '#00FF00'; // Bright Green
+                    ctx.lineWidth = 4;
+                    ctx.shadowColor = '#00FF00';
+                    ctx.shadowBlur = 10;
+                } else {
+                    ctx.strokeStyle = link.type === 'manual' ? 'rgba(255, 215, 0, 0.6)' : 'rgba(100, 116, 139, 0.2)'; // Gold for manual, Slate for auto
+                    ctx.lineWidth = link.type === 'manual' ? 2 : 1;
+                    ctx.shadowBlur = 0;
                 }
                 
-                // Connect to mouse
-                const dx = particles[i].x - mouse.x;
-                const dy = particles[i].y - mouse.y;
-                const distance = Math.sqrt(dx * dx + dy * dy);
-                if (distance < MOUSE_RADIUS) {
-                     ctx.beginPath();
-                     const opacity = 1 - (distance / MOUSE_RADIUS);
-                     ctx.strokeStyle = `${particles[i].color} ${opacity * 0.3})`;
-                     ctx.lineWidth = 0.8;
-                     ctx.moveTo(particles[i].x, particles[i].y);
-                     ctx.lineTo(mouse.x, mouse.y);
-                     ctx.stroke();
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+            });
+
+            ctx.globalAlpha = 1; // Reset alpha for manual linking line
+
+            // 3. Draw Linking Line (if actively linking)
+            if (linkingSource) {
+                const source = nodes.find(n => n.id === linkingSource);
+                if (source) {
+                    ctx.beginPath();
+                    ctx.moveTo(source.x, source.y);
+                    ctx.lineTo(mousePos.x, mousePos.y);
+                    ctx.strokeStyle = 'rgba(255, 215, 0, 0.8)';
+                    ctx.setLineDash([5, 5]);
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                    ctx.setLineDash([]);
                 }
             }
+
+            // 4. Draw Nodes
+            nodes.forEach(node => {
+                // Apply Velocity
+                if (node.id !== draggedNode) {
+                    node.x += node.vx;
+                    node.y += node.vy;
+                }
+
+                // Bounds checking (Keep inside canvas roughly)
+                const padding = 20;
+                if (node.x < padding) node.vx += 1;
+                if (node.x > width - padding) node.vx -= 1;
+                if (node.y < padding) node.vy += 1;
+                if (node.y > height - padding) node.vy -= 1;
+
+                // --- Spectral Filter Check ---
+                // 'future' status means mastered/not due
+                const isDue = node.status === 'due' || node.status === 'learning';
+                const isWeak = node.status === 'weak';
+                const isMastered = node.status === 'future';
+
+                let isVisible = true;
+                if (filterMode === 'due' && !isDue) isVisible = false;
+                if (filterMode === 'weak' && !isWeak) isVisible = false;
+                if (filterMode === 'mastered' && !isMastered) isVisible = false;
+
+                // Ghosting effect for filtered out nodes
+                ctx.globalAlpha = isVisible ? 1 : 0.1;
+
+                // Draw Node
+                const isSelected = selectedNodeIds.has(node.id);
+                const isHovered = hoveredNodeId === node.id;
+                const isInPath = suggestedPathIds.includes(node.id);
+
+                // Glow effect for selected/hovered/due/path
+                if ((isSelected || isHovered || isDue || isInPath) && isVisible) {
+                    ctx.beginPath();
+                    ctx.arc(node.x, node.y, node.radius + 8, 0, Math.PI * 2);
+                    if (isInPath) {
+                        ctx.fillStyle = 'rgba(0, 255, 0, 0.4)'; // Green for path
+                    } else {
+                        ctx.fillStyle = isDue ? 'rgba(239, 68, 68, 0.3)' : 'rgba(56, 189, 248, 0.3)';
+                    }
+                    ctx.fill();
+                }
+
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+                ctx.fillStyle = node.color;
+                ctx.shadowBlur = (isHovered && isVisible) ? 15 : 5;
+                ctx.shadowColor = node.color;
+                ctx.fill();
+                ctx.shadowBlur = 0; // Reset
+
+                // Border for selection
+                if (isSelected) {
+                    ctx.strokeStyle = '#fff';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+
+                // Label (Only if hovered or selected or few nodes OR if visibility filter is active OR in Path)
+                if ((isHovered || isSelected || isInPath || nodes.length < 15 || filterMode !== 'all') && isVisible) {
+                    ctx.fillStyle = '#fff';
+                    ctx.font = isHovered ? 'bold 12px Lexend' : '10px Lexend';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(node.title, node.x, node.y + node.radius + 15);
+                    
+                    if (isInPath) {
+                        // Order number
+                        const order = suggestedPathIds.indexOf(node.id) + 1;
+                        ctx.fillStyle = '#00FF00';
+                        ctx.font = 'bold 10px Lexend';
+                        ctx.fillText(`${order}`, node.x, node.y - node.radius - 5);
+                    }
+                }
+            });
+            
+            ctx.globalAlpha = 1; // Reset at end of frame
 
             animationFrameId = requestAnimationFrame(animate);
         };
 
-        init();
         animate();
 
         return () => {
             window.removeEventListener('resize', resize);
-            window.removeEventListener('mousemove', handleMouseMove);
             cancelAnimationFrame(animationFrameId);
         };
-    }, []);
+    }, [nodes, links, draggedNode, linkingSource, mousePos, hoveredNodeId, selectedNodeIds, filterMode, suggestedPathIds]);
 
-    // Helper for HUD buttons
-    const FilterButton = ({ type, count, label, color }: { type: string, count: number, label: string, color: string }) => (
-        <button 
-            onClick={() => setSelectedCategory(type as any)}
-            className={`flex flex-col items-center p-3 rounded-xl border transition-all duration-300 backdrop-blur-md ${
-                selectedCategory === type 
-                ? `bg-${color}/20 border-${color} shadow-[0_0_15px_rgba(0,0,0,0.3)] scale-105` 
-                : `bg-black/30 border-white/10 hover:bg-white/5`
-            }`}
-        >
-            <span className={`text-2xl font-bold text-${color}`}>{count}</span>
-            <span className="text-xs text-gray-300">{label}</span>
-        </button>
-    );
+    // Interaction Handlers
+    const handleMouseDown = (e: React.MouseEvent) => {
+        const rect = canvasRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        // Find clicked node
+        // Reverse iterate to click top nodes first
+        const clickedNode = [...nodes].reverse().find(node => {
+            const dx = node.x - x;
+            const dy = node.y - y;
+            return Math.sqrt(dx*dx + dy*dy) < node.radius + 5;
+        });
+
+        if (clickedNode) {
+            if (pathModeTargetId) {
+                // If in pathfinding target selection mode
+                handleGeneratePath(clickedNode);
+                return;
+            }
+
+            if (e.ctrlKey || e.metaKey) {
+                // Manual Linking Mode or Multi-Select
+                setLinkingSource(clickedNode.id);
+            } else {
+                // Dragging Mode
+                setDraggedNode(clickedNode.id);
+                // Also select it if not adding to multi-selection
+                if (!selectedNodeIds.has(clickedNode.id)) {
+                    setSelectedNodeIds(new Set([clickedNode.id]));
+                    onNodeClick && onNodeClick(clickedNode);
+                }
+            }
+        } else {
+            // Clicked background - clear selection & path
+            if (!e.ctrlKey) {
+                setSelectedNodeIds(new Set());
+                if (!isPathfinding) setSuggestedPathIds([]);
+            }
+        }
+    };
+
+    const handleMouseMove = (e: React.MouseEvent) => {
+        const rect = canvasRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        setMousePos({ x, y });
+
+        // Hover detection
+        const hovered = nodes.find(node => {
+            const dx = node.x - x;
+            const dy = node.y - y;
+            return Math.sqrt(dx*dx + dy*dy) < node.radius + 5;
+        });
+        setHoveredNodeId(hovered ? hovered.id : null);
+
+        if (draggedNode) {
+            // Update dragged node position directly
+            setNodes(prev => prev.map(n => {
+                if (n.id === draggedNode) {
+                    return { ...n, x: x, y: y, vx: 0, vy: 0 };
+                }
+                return n;
+            }));
+        }
+    };
+
+    const handleMouseUp = (e: React.MouseEvent) => {
+        if (linkingSource) {
+            // Finish linking?
+            const rect = canvasRef.current?.getBoundingClientRect();
+            if (rect) {
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                const targetNode = nodes.find(node => {
+                    const dx = node.x - x;
+                    const dy = node.y - y;
+                    return Math.sqrt(dx*dx + dy*dy) < node.radius + 10;
+                });
+
+                if (targetNode && targetNode.id !== linkingSource) {
+                    // Create manual link!
+                    setNodes(prev => prev.map(n => {
+                        if (n.id === linkingSource) {
+                            const currentConnections = n.connectedNodeIds || [];
+                            if (!currentConnections.includes(targetNode.id)) {
+                                return { ...n, connectedNodeIds: [...currentConnections, targetNode.id] };
+                            }
+                        }
+                        return n;
+                    }));
+                } else if (targetNode && targetNode.id === linkingSource) {
+                    // It was just a Ctrl+Click (Select)
+                    const newSelection = new Set(selectedNodeIds);
+                    if (newSelection.has(linkingSource)) newSelection.delete(linkingSource);
+                    else newSelection.add(linkingSource);
+                    setSelectedNodeIds(newSelection);
+                }
+            }
+        }
+
+        setDraggedNode(null);
+        setLinkingSource(null);
+    };
+
+    const handleNavigation = (view: 'graph' | 'search' | 'category' | '3d') => {
+        if (view === 'search' && onSearch) onSearch();
+        if (view === 'category' && onCategory) onCategory();
+        if (view === '3d' && on3DMode) on3DMode();
+    };
+
+    const handleDeepAnalysis = async () => {
+        if (nodes.length === 0) return;
+        setIsThinking(true);
+        const context = nodes.map(n => `Title: ${n.title}, Type: ${n.type}, Tags: ${n.tags?.join(', ')}`).join('\n');
+        const result = await deepAnalyzeContent(context);
+        setAnalysisResult(result);
+        setIsThinking(false);
+    };
+
+    const handleDelete = () => {
+        if (!onDeleteNodes) return;
+        const nodesToDelete = nodes.filter(n => selectedNodeIds.has(n.id));
+        if (nodesToDelete.length > 0) {
+            onDeleteNodes(nodesToDelete);
+            setSelectedNodeIds(new Set()); // Clear selection after delete
+        }
+    };
+
+    // --- Pathfinding Logic ---
+    const startPathfinding = () => {
+        setIsPathfinding(true);
+        setPathModeTargetId('SELECT'); // Waiting for selection
+        setSuggestedPathIds([]);
+    };
+
+    const handleGeneratePath = async (targetNode: any) => {
+        setPathModeTargetId(null); // Stop selecting
+        setIsThinking(true);
+        
+        // Prepare context for AI
+        const context = nodes.map(n => `ID: ${n.id}, Title: ${n.title}, Tags: ${n.tags?.join(', ')}`).join('\n');
+        
+        const pathIds = await generateLearningPath(targetNode.title, context);
+        
+        // Add target node to the end if not present (AI might miss it)
+        if (!pathIds.includes(targetNode.id)) {
+            pathIds.push(targetNode.id);
+        }
+
+        setSuggestedPathIds(pathIds);
+        setIsThinking(false);
+        setIsPathfinding(false);
+    };
 
     return (
-        <div className="bg-glow-grid-bg font-display text-text-dark min-h-screen flex flex-col relative group/design-root">
-            <style>{`
-                .material-symbols-outlined {
-                    font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
-                }
-                .grid-bg {
-                    background-color: transparent;
-                    background-image:
-                        linear-gradient(rgba(34, 211, 238, 0.1), transparent 1px),
-                        linear-gradient(90deg, rgba(34, 211, 238, 0.1), transparent 1px),
-                        linear-gradient(rgba(240, 225, 74, 0.05), transparent 1px),
-                        linear-gradient(90deg, rgba(240, 225, 74, 0.05), transparent 1px);
-                    background-size: 70px 70px, 70px 70px, 350px 350px, 350px 350px;
-                    background-position: -1px -1px, -1px -1px, -1px -1px, -1px -1px;
-                    animation: gridPulse 15s ease-in-out infinite;
-                }
-                .crystal-node {
-                    transition: transform 0.3s ease, box-shadow 0.3s ease;
-                    cursor: pointer;
-                }
-                .crystal-node:hover {
-                    transform: scale(1.1);
-                    filter: brightness(1.2);
-                }
-            `}</style>
-            
-            {/* Background Layers */}
-            <div className="absolute inset-0 bg-[#02041a] z-0"></div>
-            <div className="absolute inset-0 grid-bg z-0 pointer-events-none"></div>
-            
-            {/* Particle Canvas */}
-            <canvas 
-                ref={canvasRef} 
-                className="absolute inset-0 z-0 pointer-events-none"
-            ></canvas>
+        <div className="bg-[#02041a] font-display text-text-dark min-h-screen flex flex-col relative overflow-hidden select-none">
+            {/* Grid Background */}
+            <div 
+                className="absolute inset-0 pointer-events-none opacity-20 z-0"
+                style={{
+                    backgroundImage: 'linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px)',
+                    backgroundSize: '40px 40px'
+                }}
+            ></div>
 
-            <div className="relative flex min-h-screen w-full flex-col overflow-x-hidden z-10">
-                <header className="flex items-center justify-between whitespace-nowrap border-b border-solid border-sky-blue/20 px-4 sm:px-6 lg:px-8 py-4 sticky top-0 z-50 bg-[#02041a]/80 backdrop-blur-sm">
-                    <div className="flex items-center gap-3">
-                        <div className="text-sky-blue text-3xl">
-                            <span className="material-symbols-outlined">sailing</span>
-                        </div>
-                        <h2 className="text-xl font-bold text-white">LearnAI</h2>
-                        <div className="hidden md:flex ml-8 items-center gap-8">
-                            <a className="text-sm font-medium hover:text-sky-blue text-text-muted-dark transition-colors" href="#">Tính năng</a>
-                            <a onClick={(e) => { e.preventDefault(); onShowAbout(); }} className="text-sm font-medium hover:text-sky-blue text-text-muted-dark transition-colors cursor-pointer" href="#">Giới thiệu</a>
-                            <a onClick={(e) => { e.preventDefault(); onShowFAQ(); }} className="text-sm font-medium hover:text-sky-blue text-text-muted-dark transition-colors cursor-pointer" href="#">Hỏi đáp</a>
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-4">
-                        <button 
-                            onClick={onShowAccount}
-                            className="flex gap-2 cursor-pointer items-center justify-center overflow-hidden rounded-full h-10 px-4 bg-sky-blue/10 border border-sky-blue/50 text-sky-blue text-sm font-medium leading-normal hover:bg-sky-blue/20 transition-colors"
-                        >
-                            <span className="material-symbols-outlined text-base">person</span>
-                            <span className="truncate">Tài khoản</span>
-                        </button>
-                        <button onClick={onLogout} className="flex min-w-[84px] max-w-[480px] cursor-pointer items-center justify-center overflow-hidden rounded-full h-10 px-4 bg-sky-blue/20 text-white text-sm font-bold leading-normal tracking-[0.015em] hover:bg-sky-blue/30 transition-colors">
-                            <span className="truncate">Đăng xuất</span>
-                        </button>
-                    </div>
-                </header>
-                <main className="flex-grow">
-                    <section className="relative min-h-[calc(100vh-160px)] w-full flex flex-col items-center justify-center overflow-hidden p-4 sm:p-6 lg:p-8">
-                        <button 
-                            onClick={onBack}
-                            className="absolute top-6 left-6 z-30 flex items-center gap-2 px-4 py-2 bg-black/30 rounded-full shadow-md hover:bg-black/40 transition-all duration-300 backdrop-blur-sm border border-white/20 cursor-pointer"
-                        >
-                            <span className="material-symbols-outlined text-white" style={{ fontVariationSettings: "'FILL' 0, 'wght' 500, 'GRAD' 0, 'opsz' 24" }}>arrow_back</span>
-                            <span className="text-sm font-bold text-white hidden sm:inline">Quay về</span>
-                        </button>
-
-                        {/* Spaced Repetition HUD */}
-                        <div className="absolute top-20 right-6 z-30 w-64 bg-black/40 backdrop-blur-lg border border-sky-blue/30 rounded-2xl p-4 shadow-xl animate-[fadeIn_0.5s_ease-out]">
-                            <h3 className="text-white font-bold text-sm mb-3 flex items-center gap-2">
-                                <span className="material-symbols-outlined text-neon-yellow text-sm">timelapse</span>
-                                Hải trình Lặp lại (SM-2)
-                            </h3>
-                            <div className="grid grid-cols-2 gap-2">
-                                <FilterButton type="due" count={dueNodes.length} label="Đến hạn" color="red-500" />
-                                <FilterButton type="future" count={futureNodes.length} label="Chưa hạn" color="green-500" />
-                                <FilterButton type="weak" count={weakNodes.length} label="Còn yếu" color="orange-500" />
-                                <FilterButton type="learning" count={learningNodes.length} label="Chưa vững" color="blue-400" />
-                            </div>
-                            <button 
-                                onClick={() => setSelectedCategory('all')}
-                                className={`w-full mt-3 py-2 rounded-lg text-xs font-bold transition-all ${selectedCategory === 'all' ? 'bg-white/20 text-white' : 'text-gray-400 hover:bg-white/10'}`}
-                            >
-                                Hiển thị tất cả
-                            </button>
-                        </div>
-
-                        <div className="relative w-full h-[60vh] max-w-6xl z-10 perspective-[1000px]">
-                            {/* Static Background Graph */}
-                            <div className="absolute w-full h-full" style={{ transformStyle: 'preserve-3d', transform: 'rotateX(60deg) rotateZ(-30deg)' }}>
-                                <svg className="absolute w-full h-full opacity-60" fill="none" preserveAspectRatio="none" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-                                    <defs>
-                                        <linearGradient id="neon-stream" x1="0%" x2="100%" y1="0%" y2="0%">
-                                            <stop offset="0%" stopColor="#f0e14a"></stop>
-                                            <stop offset="50%" stopColor="#22d3ee"></stop>
-                                            <stop offset="100%" stopColor="#f0e14a"></stop>
-                                        </linearGradient>
-                                        <filter height="300%" id="glow" width="300%" x="-100%" y="-100%">
-                                            <feGaussianBlur result="coloredBlur" stdDeviation="2"></feGaussianBlur>
-                                            <feMerge>
-                                                <feMergeNode in="coloredBlur"></feMergeNode>
-                                                <feMergeNode in="SourceGraphic"></feMergeNode>
-                                            </feMerge>
-                                        </filter>
-                                    </defs>
-                                    <g filter="url(#glow)">
-                                        <path d="M 22 50 C 30 50, 30 35, 40 35" stroke="url(#neon-stream)" strokeLinecap="round" strokeWidth="0.8"></path>
-                                        <path d="M 22 50 C 30 50, 30 65, 40 65" stroke="url(#neon-stream)" strokeLinecap="round" strokeWidth="0.8"></path>
-                                        <path d="M 60 35 C 70 35, 70 50, 78 50" stroke="url(#neon-stream)" strokeLinecap="round" strokeWidth="0.8"></path>
-                                        <path d="M 60 65 C 70 65, 70 50, 78 50" stroke="url(#neon-stream)" strokeLinecap="round" strokeWidth="0.8"></path>
-                                        <path d="M 40 35 C 45 35, 55 35, 60 35" stroke="url(#neon-stream)" strokeLinecap="round" strokeWidth="0.8"></path>
-                                        <path d="M 40 65 C 45 65, 55 65, 60 65" stroke="url(#neon-stream)" strokeLinecap="round" strokeWidth="0.8"></path>
-                                    </g>
-                                </svg>
-                                
-                                {/* Render User Nodes on the Graph */}
-                                {displayNodes.map((node) => {
-                                    // Determine visual style based on status
-                                    let borderColor = 'border-white/30';
-                                    let shadowColor = 'shadow-glow-blue';
-                                    let statusIndicator = null;
-
-                                    if (getReviewStatus(node) === 'due') {
-                                        borderColor = 'border-red-500/80';
-                                        shadowColor = 'shadow-[0_0_20px_rgba(239,68,68,0.6)]';
-                                        statusIndicator = <div className="absolute -top-1 -right-1 size-3 bg-red-500 rounded-full animate-ping"></div>;
-                                    } else if (getReviewStatus(node) === 'weak') {
-                                        borderColor = 'border-orange-500/80';
-                                        shadowColor = 'shadow-[0_0_20px_rgba(249,115,22,0.6)]';
-                                    }
-
-                                    return (
-                                        <div 
-                                            key={node.id}
-                                            onClick={() => onNodeClick && onNodeClick(node)}
-                                            className="crystal-node absolute animate-float" 
-                                            style={{ 
-                                                top: `${node.y}%`, 
-                                                left: `${node.x}%`, 
-                                                animationDuration: `${5 + Math.random() * 5}s`,
-                                                animationDelay: `-${Math.random() * 5}s`
-                                            }}
-                                        >
-                                            <div className={`relative px-5 py-3 text-sm font-bold text-white bg-black/60 rounded-2xl ${shadowColor} border ${borderColor} backdrop-blur-sm flex items-center gap-2 group`}>
-                                                {statusIndicator}
-                                                <span className="truncate max-w-[120px]">{node.title}</span>
-                                                <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 opacity-0 group-hover:opacity-100 transition-opacity bg-black/80 px-2 py-1 text-xs rounded whitespace-nowrap z-50 pointer-events-none">
-                                                    {node.type} • Interval: {node.sm2?.interval}d
-                                                </div>
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                        <div className="absolute bottom-6 right-6 z-30 flex flex-col gap-3">
-                            <button 
-                                onClick={onSearch}
-                                className="flex items-center justify-center gap-2.5 px-4 py-2.5 bg-sky-blue/10 text-sky-blue rounded-full border border-sky-blue/30 backdrop-blur-md hover:bg-sky-blue/20 hover:border-sky-blue/50 transition-all shadow-glow-neon"
-                            >
-                                <span className="material-symbols-outlined text-base">search</span>
-                                <span className="text-sm font-semibold">Tìm kiếm</span>
-                            </button>
-                            <button 
-                                onClick={onCategory}
-                                className="flex items-center justify-center gap-2.5 px-4 py-2.5 bg-sky-blue/10 text-sky-blue rounded-full border border-sky-blue/30 backdrop-blur-md hover:bg-sky-blue/20 hover:border-sky-blue/50 transition-all shadow-glow-neon"
-                            >
-                                <span className="material-symbols-outlined text-base">category</span>
-                                <span className="text-sm font-semibold">Phân loại</span>
-                            </button>
-                            <button 
-                                onClick={on3DMode}
-                                className="flex items-center justify-center gap-2.5 px-4 py-2.5 bg-sky-blue/10 text-sky-blue rounded-full border border-sky-blue/30 backdrop-blur-md hover:bg-sky-blue/20 hover:border-sky-blue/50 transition-all shadow-glow-neon"
-                            >
-                                <span className="material-symbols-outlined text-base">3d_rotation</span>
-                                <span className="text-sm font-semibold">Chế độ 3D</span>
-                            </button>
-                        </div>
-                    </section>
-                </main>
-                <footer className="px-4 sm:px-6 lg:px-8 py-8 border-t border-sky-blue/20 bg-[#02041a]/80 backdrop-blur-sm">
-                    <div className="flex flex-col md:flex-row justify-between items-center gap-6">
-                        <div className="flex items-center gap-3">
-                            <div className="text-sky-blue text-2xl">
-                                <span className="material-symbols-outlined">sailing</span>
-                            </div>
-                            <h2 className="text-lg font-bold text-white">LearnAI</h2>
-                        </div>
-                        <div className="flex gap-6 text-sm font-medium text-text-muted-dark">
-                            <a className="hover:text-sky-blue transition-colors" href="#">Điều khoản dịch vụ</a>
-                            <a className="hover:text-sky-blue transition-colors" href="#">Chính sách bảo mật</a>
-                        </div>
-                        <p className="text-sm text-text-muted-dark">© 2024 LearnAI. All rights reserved.</p>
-                    </div>
-                </footer>
+            {/* Canvas Layer */}
+            <div className={`flex-grow relative h-[calc(100vh-80px)] w-full ${pathModeTargetId === 'SELECT' ? 'cursor-alias' : 'cursor-crosshair'}`} ref={containerRef}>
+                <canvas 
+                    ref={canvasRef} 
+                    onMouseDown={handleMouseDown}
+                    onMouseMove={handleMouseMove}
+                    onMouseUp={handleMouseUp}
+                    onMouseLeave={() => { setDraggedNode(null); setLinkingSource(null); }}
+                    className="absolute inset-0 z-10"
+                />
             </div>
+
+            {/* UI Overlays */}
+            <button onClick={onBack} className="absolute top-6 left-6 z-30 flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 rounded-full backdrop-blur-sm border border-white/10 transition-all text-white text-sm font-bold shadow-lg">
+                <span className="material-symbols-outlined text-lg">arrow_back</span> Quay về
+            </button>
+
+            {/* Spectral Filters Toolbar */}
+            <div className="absolute top-6 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1 p-1 bg-[#0f172a]/80 backdrop-blur-xl border border-white/10 rounded-full shadow-2xl">
+                <button 
+                    onClick={() => setFilterMode('all')}
+                    className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${filterMode === 'all' ? 'bg-white text-black shadow-glow-white-sm' : 'text-slate-400 hover:text-white'}`}
+                >
+                    Tất cả
+                </button>
+                <button 
+                    onClick={() => setFilterMode('due')}
+                    className={`flex items-center gap-1 px-4 py-1.5 rounded-full text-xs font-bold transition-all ${filterMode === 'due' ? 'bg-red-500 text-white shadow-lg' : 'text-slate-400 hover:text-red-400'}`}
+                >
+                    <span className="material-symbols-outlined text-[14px]">notifications_active</span>
+                    Đến hạn
+                </button>
+                <button 
+                    onClick={() => setFilterMode('weak')}
+                    className={`flex items-center gap-1 px-4 py-1.5 rounded-full text-xs font-bold transition-all ${filterMode === 'weak' ? 'bg-yellow-500 text-black shadow-lg' : 'text-slate-400 hover:text-yellow-400'}`}
+                >
+                    <span className="material-symbols-outlined text-[14px]">warning</span>
+                    Yếu
+                </button>
+                <button 
+                    onClick={() => setFilterMode('mastered')}
+                    className={`flex items-center gap-1 px-4 py-1.5 rounded-full text-xs font-bold transition-all ${filterMode === 'mastered' ? 'bg-green-500 text-white shadow-lg' : 'text-slate-400 hover:text-green-400'}`}
+                >
+                    <span className="material-symbols-outlined text-[14px]">check_circle</span>
+                    Đã thuộc
+                </button>
+            </div>
+
+            {/* HUD Panel */}
+            <div className="absolute top-6 right-6 z-30 w-60 bg-[#0f172a]/80 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl">
+                <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-white text-xs font-bold uppercase tracking-widest text-sky-400">Điều khiển</h3>
+                    <div className="flex gap-2">
+                        <span className="text-[10px] text-slate-400 bg-white/5 px-2 py-1 rounded">Nodes: {nodes.length}</span>
+                    </div>
+                </div>
+                <div className="text-xs text-slate-400 space-y-2 mb-4">
+                    <p>• <b>Kéo</b> để di chuyển node</p>
+                    <p>• <b>Ctrl + Kéo</b> để nối dây</p>
+                    <p>• <b>Ctrl + Click</b> để chọn nhiều</p>
+                </div>
+                
+                <div className="pt-4 border-t border-white/10 space-y-2">
+                    <button 
+                        onClick={handleDeepAnalysis}
+                        disabled={isThinking}
+                        className="w-full py-2.5 rounded-lg bg-gradient-to-r from-purple-600 to-blue-600 text-white font-bold text-sm shadow-lg hover:shadow-purple-500/25 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                    >
+                        {isThinking ? <span className="material-symbols-outlined animate-spin text-lg">sync</span> : <span className="material-symbols-outlined text-lg">psychology</span>}
+                        {isThinking ? "Đang suy nghĩ..." : "Phân tích Sâu"}
+                    </button>
+                    
+                    <button 
+                        onClick={startPathfinding}
+                        disabled={isThinking}
+                        className="w-full py-2.5 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-bold text-sm shadow-lg hover:shadow-emerald-500/25 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                    >
+                        <span className="material-symbols-outlined text-lg">explore</span>
+                        Tìm Lộ Trình
+                    </button>
+                </div>
+            </div>
+
+            {/* Instruction Toast for Pathfinder */}
+            {pathModeTargetId === 'SELECT' && (
+                <div className="absolute top-24 left-1/2 -translate-x-1/2 z-40 bg-black/80 text-white px-6 py-3 rounded-full border border-green-500 shadow-glow-green animate-bounce">
+                    Chọn một nốt mục tiêu để AI vẽ lộ trình
+                </div>
+            )}
+
+            {/* Floating Action Bar */}
+            {selectedNodeIds.size > 0 && (
+                <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-40 bg-white/10 backdrop-blur-xl border border-white/20 px-6 py-3 rounded-full flex items-center gap-4 shadow-2xl animate-[fadeInUp_0.3s_ease-out]">
+                    <span className="text-white font-bold text-sm mr-2">{selectedNodeIds.size} đã chọn</span>
+                    <div className="h-6 w-[1px] bg-white/20"></div>
+                    <button 
+                        onClick={() => onStartPlaylist && onStartPlaylist(nodes.filter(n => selectedNodeIds.has(n.id)))}
+                        className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-green-500 hover:bg-green-600 text-white text-sm font-bold transition-colors"
+                    >
+                        <span className="material-symbols-outlined text-lg">play_circle</span>
+                        Học Playlist
+                    </button>
+                    <button 
+                        onClick={() => onMergeNodes && onMergeNodes(nodes.filter(n => selectedNodeIds.has(n.id)))}
+                        disabled={selectedNodeIds.size < 2}
+                        className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-purple-500 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-bold transition-colors"
+                    >
+                        <span className="material-symbols-outlined text-lg">call_merge</span>
+                        Hợp nhất
+                    </button>
+                    <button 
+                        onClick={handleDelete}
+                        className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-red-500 hover:bg-red-600 text-white text-sm font-bold transition-colors"
+                    >
+                        <span className="material-symbols-outlined text-lg">delete</span>
+                    </button>
+                    <button 
+                        onClick={() => setSelectedNodeIds(new Set())}
+                        className="p-1.5 rounded-full hover:bg-white/10 text-white transition-colors"
+                    >
+                        <span className="material-symbols-outlined text-lg">close</span>
+                    </button>
+                </div>
+            )}
+
+            {/* Deep Analysis Modal */}
+            {analysisResult && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-[fadeIn_0.3s]">
+                    <div className="bg-[#0f172a] border border-purple-500/50 p-8 rounded-2xl max-w-2xl w-full shadow-2xl relative max-h-[80vh] overflow-y-auto">
+                        <button onClick={() => setAnalysisResult(null)} className="absolute top-4 right-4 text-slate-400 hover:text-white"><span className="material-symbols-outlined">close</span></button>
+                        <h3 className="text-2xl font-bold text-purple-300 mb-4 flex items-center gap-2"><span className="material-symbols-outlined">psychology</span> Kết quả Phân tích</h3>
+                        <div className="prose prose-invert prose-p:text-slate-300"><p className="whitespace-pre-wrap">{analysisResult}</p></div>
+                    </div>
+                </div>
+            )}
+
+            <NavigationDock activeView="graph" onNavigate={handleNavigation} />
         </div>
     );
 };
