@@ -1,8 +1,6 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
 // Helper: Fetch content from URL using a CORS proxy with fallback
 const fetchUrlContent = async (url: string): Promise<string> => {
   // Danh sách các Proxy để dự phòng nếu cái này lỗi thì dùng cái kia
@@ -70,6 +68,7 @@ export const sendMessageToGemini = async (
   try {
     const defaultInstruction = "You are a friendly, encouraging AI tutor for LearnAI. You help users learn languages and subjects using the Socratic method and spaced repetition concepts. Keep answers concise, helpful, and motivating.";
     
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const chat = ai.chats.create({
       model: 'gemini-2.5-flash',
       config: {
@@ -253,6 +252,7 @@ export const generateLearningContent = async (
         case 'Case Study': systemInstruction = "Create exactly 12 mini case studies."; break;
     }
 
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: `Analyze this content and generate ${method}:\n\n${finalContentToProcess}`,
@@ -288,6 +288,7 @@ export const generateContentFromImage = async (
         // Convert base64 data URL to simple base64 string if needed
         const base64Data = imageBase64.split(',')[1] || imageBase64;
 
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
             contents: {
@@ -328,6 +329,7 @@ export const generateLearningPath = async (
     allNodesContext: string
 ): Promise<string[]> => {
     try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
             contents: `I have a knowledge graph with the following nodes (Format: ID - Title - Tags):
@@ -379,6 +381,7 @@ export const refineLearningContent = async (
             prompt = "Where appropriate (explanations or analyses), add a short real-world example. Keep the same JSON structure.";
         }
 
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
             contents: `Refine the following JSON content based on this instruction: "${prompt}"\n\nJSON:\n${jsonString}`,
@@ -403,6 +406,7 @@ export const refineLearningContent = async (
  */
 export const generateCoverImage = async (prompt: string, aspectRatio: string = "16:9"): Promise<string> => {
     try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const response = await ai.models.generateContent({
             model: 'gemini-3-pro-image-preview',
             contents: {
@@ -437,6 +441,7 @@ export const generateCoverImage = async (prompt: string, aspectRatio: string = "
  */
 export const deepAnalyzeContent = async (context: string): Promise<string> => {
     try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const response = await ai.models.generateContent({
             model: "gemini-3-pro-preview",
             contents: `Please perform a deep, structural analysis of the following educational content. 
@@ -462,6 +467,7 @@ export const deepAnalyzeContent = async (context: string): Promise<string> => {
  */
 export const suggestHiddenConnections = async (allNodesContext: string): Promise<{source: string, target: string, reason: string}[]> => {
     try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
             contents: `Analyze these knowledge nodes (ID - Title - Tags):
