@@ -455,3 +455,42 @@ export const deepAnalyzeContent = async (context: string): Promise<string> => {
         return "Sorry, I couldn't perform the deep analysis at this time.";
     }
 }
+
+/**
+ * Feature: Knowledge Compass - Suggest Hidden Connections
+ * Analyzes nodes to find semantic links
+ */
+export const suggestHiddenConnections = async (allNodesContext: string): Promise<{source: string, target: string, reason: string}[]> => {
+    try {
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: `Analyze these knowledge nodes (ID - Title - Tags):
+            ${allNodesContext}
+            
+            Identify 3-5 non-obvious, semantic connections between nodes that do not share tags but have related concepts.
+            Return JSON array: [{ "source": "id_a", "target": "id_b", "reason": "short reason" }]`,
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.ARRAY,
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            source: { type: Type.STRING },
+                            target: { type: Type.STRING },
+                            reason: { type: Type.STRING }
+                        }
+                    }
+                }
+            }
+        });
+
+        if (response.text) {
+            return JSON.parse(response.text);
+        }
+        return [];
+    } catch (error) {
+        console.error("Hidden connections error:", error);
+        return [];
+    }
+}
